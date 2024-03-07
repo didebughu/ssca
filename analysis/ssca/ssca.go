@@ -21,9 +21,8 @@ var Analyzer = &analysis.Analyzer{
 }
 
 type dataFact struct {
-	req     map[string]bool
-	posn    map[string]token.Pos
-	related map[string][]analysis.RelatedInformation
+	req     bool
+	related token.Pos
 }
 
 func (*dataFact) AFact() {}
@@ -36,21 +35,19 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		(*ast.FuncDecl)(nil),
 	}
 
-	fact := new(dataFact)
-	fact.req = make(map[string]bool)
-	fact.posn = make(map[string]token.Pos)
-	fact.related = make(map[string][]analysis.RelatedInformation)
-
 	inspect.Preorder(nodeFilter, func(node ast.Node) {
 
 		funcDecl := node.(*ast.FuncDecl)
-		funcName := funcDecl.Name.Name
+
+		if funcDecl.Name.Obj == nil {
+			return
+		}
+
+		fact := new(dataFact)
+		fact.req = false
+		fact.related = 0
 
 		ast.Inspect(funcDecl, func(n ast.Node) bool {
-
-			pkgFact := new(dataFact)
-			pkgFact.req = make(map[string]bool)
-			pkgFact.posn = make(map[string]token.Pos)
 
 			c, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -65,32 +62,32 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					return true
 				}
 				if f.Sel.Name == "Get" && pass.TypesInfo.Uses[f.Sel].Pkg().Path() == "net/http" {
-					fact.req[funcName] = true
-					fact.posn[funcName] = funcDecl.Pos()
-					if c.Pos() != 0 {
-						fact.related[funcName] = append(fact.related[funcName],
-							analysis.RelatedInformation{Pos: c.Pos(), Message: "first related call"})
-					}
-				} else if pass.ImportPackageFact(pass.TypesInfo.Uses[f.Sel].Pkg(), pkgFact) {
-					fact.req[funcName] = pkgFact.req[f.Sel.Name]
-					if pkgFact.req[f.Sel.Name] && pkgFact.posn[f.Sel.Name] != 0 {
-						fact.related[funcName] = append(pkgFact.related[f.Sel.Name],
-							analysis.RelatedInformation{Pos: pkgFact.posn[f.Sel.Name], Message: "related call"})
-					}
+					fact.req = true
+					fact.related = c.Pos()
+					pass.ExportObjectFact(pass.TypesInfo.ObjectOf(funcDecl.Name), fact)
+					return false
 				}
-			}
-			if fact.req[funcName] {
-				pass.Report(analysis.Diagnostic{
-					Pos:     funcDecl.Pos(),
-					Message: "call NewRequest",
-					Related: fact.related[funcName],
-				})
+				pkgFact := new(dataFact)
+				if pass.ImportObjectFact(pass.TypesInfo.ObjectOf(f.Sel), pkgFact) && pkgFact.req {
+					fact.req = true
+					fact.related = c.Pos()
+					pass.ExportObjectFact(pass.TypesInfo.ObjectOf(funcDecl.Name), fact)
+					return false
+				}
 			}
 			return true
 		})
+		if fact.req {
+			pass.Report(analysis.Diagnostic{
+				Pos:     funcDecl.Pos(),
+				Message: "call NewRequest",
+				Related: []analysis.RelatedInformation{{
+					Pos:     fact.related,
+					Message: "related call",
+				}},
+			})
+		}
 	})
-
-	pass.ExportPackageFact(fact)
 
 	return nil, nil
 }
